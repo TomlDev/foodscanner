@@ -1,0 +1,6 @@
+# Zugangsdaten und lokaler Zustand – niemals committen
+.env
+state.json
+state.tmp
+*.log
+__pycache__/
