@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" alt="foodscanner" width="420"></p>
+
 # foodscanner
 
 Telegram-Benachrichtigung, sobald in deinen [foodsharing](https://foodsharing.de)-Bezirken ein **neuer Betrieb** auftaucht oder ein **Team wieder aufmacht**.
@@ -83,6 +85,8 @@ Alle Einstellungen können statt in `.env` auch als Umgebungsvariablen gesetzt w
 - **Fehler:** Wenn der Login oder die API nicht funktioniert, schickt foodscanner eine ⚠️-Nachricht, einmal pro Fehlerart.
 
 Dies ist ein privates Projekt und steht in keiner Verbindung zu foodsharing e. V.
+
+Tipp: `assets/icon.png` eignet sich als Profilbild für deinen Bot (bei @BotFather mit `/setuserpic`).
 
 ## Lizenz
 
