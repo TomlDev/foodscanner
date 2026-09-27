@@ -72,9 +72,18 @@ cp .env.example .env && chmod 600 .env
 5. Richte den regelmäßigen Lauf ein (`crontab -e`):
    ```
    */15 * * * * /usr/bin/python3 /pfad/zu/foodscanner/foodscanner.py >> /pfad/zu/foodscanner/foodscanner.log 2>&1
+   * * * * * /usr/bin/python3 /pfad/zu/foodscanner/foodscanner.py --bot >> /pfad/zu/foodscanner/bot.log 2>&1
    ```
+   Die erste Zeile prüft alle 15 Minuten die Betriebe. Die zweite ist optional und beantwortet Bot-Befehle wie `/status`, siehe unten.
+   Führ `--chat-id` aus, bevor du die zweite Zeile einrichtest, weil der Bot danach die Nachrichten selbst abholt.
 
 Alle Einstellungen können statt in `.env` auch als Umgebungsvariablen gesetzt werden, z. B. für Docker oder systemd.
+
+## Bot-Befehle
+
+Wenn die `--bot`-Zeile im Cron eingerichtet ist, antwortet der Bot innerhalb weniger Sekunden. Befehle nimmt er nur aus dem eingetragenen Chat an.
+
+- `/status`: Läuft alles? Zeigt die letzte erfolgreiche Prüfung, laufende Störungen, die überwachten Betriebe und die letzte Meldung.
 
 ## Gut zu wissen
 
@@ -82,7 +91,7 @@ Alle Einstellungen können statt in `.env` auch als Umgebungsvariablen gesetzt w
 - **Zugangsdaten:** Dein foodsharing-Passwort liegt im Klartext in `.env` auf dem Rechner. Schütze die Datei (`chmod 600`) und nutze foodscanner nur auf Geräten, denen du vertraust.
 - **2FA:** Konten mit Zwei-Faktor-Anmeldung werden derzeit nicht unterstützt.
 - **Fairness:** Eine schnelle Meldung ist kein Freifahrtschein. Lies den Infotext, halte dich an die Regeln der Betriebsverantwortlichen und bewirb dich nur, wenn du die Abholungen auch wirklich übernehmen kannst.
-- **Fehler:** Wenn der Login oder die API nicht funktioniert, schickt foodscanner eine ⚠️-Nachricht, einmal pro Fehlerart.
+- **Störungen:** Kurze Ausfälle bei foodsharing (z. B. „502 Bad Gateway“) kommen öfter vor und werden erst gemeldet, wenn sie länger als eine Stunde dauern. Dauerhafte Fehler wie ein falsches Passwort meldet foodscanner sofort. Du bekommst dann einmal eine ⚠️-Nachricht und eine ✅-Nachricht, sobald es wieder läuft.
 
 Dies ist ein privates Projekt und steht in keiner Verbindung zu foodsharing e. V.
 

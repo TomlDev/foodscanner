@@ -7,7 +7,9 @@ Aufruf:
   foodscanner.py --dry-run  nur anzeigen, nichts senden, State nicht speichern
   foodscanner.py --chat-id  zeigt Chat-IDs, die dem Bot geschrieben haben
   foodscanner.py --test     schickt eine Testnachricht an Telegram
+  foodscanner.py --bot      beantwortet ~1 Minute lang Bot-Befehle wie /status (für Cron, jede Minute)
 """
+import fcntl
 import html
 import json
 import math
@@ -22,7 +24,14 @@ import requests
 BASE = "https://foodsharing.de"  # per FOODSHARING_URL änderbar (z. B. https://foodsharing.at)
 DIR = Path(__file__).resolve().parent
 STATE_FILE = DIR / "state.json"
+BOT_STATE_FILE = DIR / "bot.json"
+BOT_LOCK_FILE = DIR / ".bot.lock"
 ENV_FILE = DIR / ".env"
+
+# Vorübergehende Fehler (foodsharing down, 502 …) erst melden, wenn sie so lange anhalten.
+ERROR_ALERT_AFTER = 60 * 60
+# Ab diesem Alter der letzten erfolgreichen Prüfung warnt /status.
+STALE_AFTER = 45 * 60
 
 # Bezirks-Typen (Region-Klassifikation), die als "eigener Bezirk" zählen:
 # 1 Stadt, 2 Bezirk, 3 Region, 8 Großstadt, 9 Stadtteil.
@@ -262,16 +271,146 @@ def send_all(env, messages, dry_run):
             time.sleep(1)
 
 
-def load_state():
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
+def load_state(path=None):
+    path = path or STATE_FILE
+    if path.exists():
+        return json.loads(path.read_text())
     return {}
 
 
-def save_state(state):
-    tmp = STATE_FILE.with_suffix(".tmp")
+def save_state(state, path=None):
+    path = path or STATE_FILE
+    tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1))
-    os.replace(tmp, STATE_FILE)
+    os.replace(tmp, path)
+
+
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def log(msg):
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", file=sys.stderr)
+
+
+def is_transient(e):
+    """Netzwerkprobleme und 5xx-Antworten gehen meist von selbst weg."""
+    if isinstance(e, (requests.ConnectionError, requests.Timeout)):
+        return True
+    return isinstance(e, requests.HTTPError) and e.response is not None and e.response.status_code >= 500
+
+
+def fmt_time(iso):
+    return time.strftime("%d.%m. %H:%M", time.strptime(iso, "%Y-%m-%dT%H:%M:%S"))
+
+
+def age_seconds(iso):
+    return time.time() - time.mktime(time.strptime(iso, "%Y-%m-%dT%H:%M:%S"))
+
+
+def fmt_age(seconds):
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"vor {minutes} Min."
+    if minutes < 48 * 60:
+        return f"vor {minutes // 60} Std."
+    return f"vor {minutes // (24 * 60)} Tagen"
+
+
+def record_error(env, state, e, dry_run):
+    """Merkt sich eine laufende Störung und meldet sie einmal – vorübergehende erst nach ERROR_ALERT_AFTER."""
+    log(f"Fehler: {e}")
+    if dry_run:
+        return
+    err = state.get("error") or {"since": now_iso(), "count": 0}
+    err["count"] += 1
+    err["message"] = str(e)
+    if (not is_transient(e) or age_seconds(err["since"]) >= ERROR_ALERT_AFTER) and err.get("alerted") != str(e):
+        try:
+            telegram(
+                env,
+                f"⚠️ <b>foodscanner-Fehler</b> seit {fmt_time(err['since'])} ({err['count']} fehlgeschlagene Prüfungen):\n"
+                f"{html.escape(str(e))}\n\nDu bekommst eine Nachricht, sobald es wieder läuft.",
+            )
+            err["alerted"] = str(e)
+        except Exception as te:
+            log(f"Telegram nicht erreichbar: {te}")
+    state["error"] = err
+    save_state(state)
+
+
+def status_text(env):
+    state = load_state()
+    updated, err = state.get("updated"), state.get("error")
+    if err:
+        head = "⚠️ <b>foodscanner hat gerade Probleme</b>"
+    elif not updated or age_seconds(updated) > STALE_AFTER:
+        head = "⚠️ <b>foodscanner prüft nicht mehr</b> – läuft der Cronjob?"
+    else:
+        head = "✅ <b>foodscanner läuft</b>"
+    lines = [head]
+    if updated:
+        lines.append(f"Letzte erfolgreiche Prüfung: {fmt_time(updated)} ({fmt_age(age_seconds(updated))})")
+    if err:
+        lines.append(
+            f"Fehler seit {fmt_time(err['since'])} ({err['count']} fehlgeschlagene Prüfungen):\n{html.escape(err['message'])}"
+        )
+    if state.get("districts"):
+        lines.append(f"Bezirke: {html.escape(', '.join(state['districts'].values()))}")
+    if state.get("stores") is not None:
+        radius = f" im Umkreis von {env['MAX_DISTANCE_KM']} km" if env.get("MAX_DISTANCE_KM") else ""
+        watched = f"{len(state['stores'])} Betriebe"
+        if "matching" in state:
+            watched += f", davon {state['matching']} passende Abholbetriebe{radius}"
+        lines.append(f"Überwacht: {watched}")
+    last = state.get("last_message")
+    lines.append(f"Letzte Meldung: {fmt_time(last) + ' (' + fmt_age(age_seconds(last)) + ')' if last else 'noch keine'}")
+    return "\n".join(lines)
+
+
+HELP_TEXT = (
+    "🔎 <b>foodscanner</b> meldet sich automatisch, wenn in deinen Bezirken ein Betrieb neu dazukommt "
+    "oder ein Team aufmacht.\n\n/status – läuft alles? Wann wurde zuletzt geprüft?"
+)
+BOT_COMMANDS = [{"command": "status", "description": "Läuft alles? Wann wurde zuletzt geprüft?"}]
+
+
+def run_bot(env, seconds=55):
+    """Beantwortet Befehle per Long-Polling. Läuft knapp eine Minute; Cron startet es jede Minute neu."""
+    lock = open(BOT_LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return  # vorheriger Lauf ist noch aktiv
+    token, chat = env.get("TELEGRAM_BOT_TOKEN"), str(env.get("TELEGRAM_CHAT_ID", ""))
+    if not token or not chat:
+        sys.exit("TELEGRAM_BOT_TOKEN oder TELEGRAM_CHAT_ID fehlt in .env")
+    api = f"https://api.telegram.org/bot{token}"
+    bot = load_state(BOT_STATE_FILE)
+    try:
+        if bot.get("commands") != BOT_COMMANDS:
+            requests.post(f"{api}/setMyCommands", json={"commands": BOT_COMMANDS}, timeout=30).raise_for_status()
+            bot["commands"] = BOT_COMMANDS
+            save_state(bot, BOT_STATE_FILE)
+        deadline = time.time() + seconds
+        while (wait := int(deadline - time.time())) > 1:
+            r = requests.get(
+                f"{api}/getUpdates",
+                params={"offset": bot.get("offset", 0), "timeout": wait, "allowed_updates": '["message"]'},
+                timeout=wait + 15,
+            )
+            r.raise_for_status()
+            for update in r.json().get("result", []):
+                bot["offset"] = update["update_id"] + 1
+                msg = update.get("message") or {}
+                if str(msg.get("chat", {}).get("id")) != chat:
+                    continue  # nur der eingetragene Chat darf den Bot abfragen
+                command = (msg.get("text") or "").split(maxsplit=1)[0:1]
+                command = command[0].split("@")[0].lower() if command else ""
+                telegram(env, status_text(env) if command == "/status" else HELP_TEXT)
+            save_state(bot, BOT_STATE_FILE)
+    except (requests.RequestException, RuntimeError) as e:
+        log(f"Bot-Fehler: {e}")
 
 
 def show_chat_ids(env):
@@ -303,6 +442,8 @@ def main():
     if "--test" in args:
         telegram(env, "✅ foodscanner: Telegram-Benachrichtigung funktioniert.")
         return print("Testnachricht gesendet.")
+    if "--bot" in args:
+        return run_bot(env)
 
     state = load_state()
     fs = None
@@ -320,15 +461,7 @@ def main():
     except Exception as e:
         if fs:
             fs.logout()
-        print(f"Fehler: {e}", file=sys.stderr)
-        # Nur einmal pro Fehlerart melden, nicht bei jedem Cron-Lauf.
-        if not dry_run and state.get("last_error") != str(e):
-            try:
-                telegram(env, f"⚠️ foodscanner-Fehler:\n{html.escape(str(e))}")
-            except Exception as te:
-                print(f"Telegram nicht erreichbar: {te}", file=sys.stderr)
-            state["last_error"] = str(e)
-            save_state(state)
+        record_error(env, state, e, dry_run)
         sys.exit(1)
 
     # Gemeldet werden nur Abholbetriebe ohne "Test"/"Abgabestelle" im Namen innerhalb von MAX_DISTANCE_KM
@@ -374,12 +507,22 @@ def main():
         messages = diff(near_old, near_stores, fs, home, wanted)
     fs.logout()
 
+    notified = bool(messages)
+    err = state.get("error")
+    if err and err.get("alerted"):
+        messages.insert(0, f"✅ <b>foodscanner läuft wieder</b> (Störung seit {fmt_time(err['since'])}, {err['count']} fehlgeschlagene Prüfungen)")
     if messages:
         send_all(env, messages, dry_run)
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {len(stores)} Betriebe, {len(messages)} Meldungen")
 
     if not dry_run:
-        save_state({"stores": stores, "districts": districts, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        save_state({
+            "stores": stores,
+            "districts": districts,
+            "matching": len(near_stores),
+            "updated": now_iso(),
+            "last_message": now_iso() if notified else state.get("last_message"),
+        })
 
 
 if __name__ == "__main__":

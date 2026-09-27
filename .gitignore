@@ -4,3 +4,6 @@ state.json
 state.tmp
 *.log
 __pycache__/
+bot.json
+bot.tmp
+.bot.lock
